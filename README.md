@@ -40,6 +40,24 @@
 
 ---
 
+## 🔗 Полезные материалы
+
+Подборка Telegram-каналов для прокачки в Python и смежных областях:
+
+- 🖥 **[Python](https://t.me/+p-hGlzVQrqM4MDI6)** ([зеркало](https://t.me/+DNiTvr30y9BiNzli)) — с помощью понятных картинок и коротких видео авторы объясняют сложные концепции и учат профессиональному подходу в разработке.
+- 🖥 **[Python Интервью](https://t.me/+sTT6sbZubDM2MWEy)** — огромное количество разобранных вопросов с реальных собеседований Python-разработчика.
+- 🧠 **[Machine Learning](https://t.me/+rn-i1Uz1lDtjNmFi)** — ИИ-инструменты для генерации Python-кода, умные агенты и всё, что нужно знать из области AI.
+- 📖 **[PythonBooks](https://t.me/+8Dvl5VlUs5NhMTIy)** ([зеркало](https://t.me/+VnfYvBmK_ZM3YzIy)) — канал с книгами по Linux и, наверное, самая большая подборка книг.
+- 💼 **[Python Jobs](https://t.me/+eQsE0ZVnmINmNjQy)** — вакансии и подработка для Python-разработчиков.
+- 🔝 **[Кладезь Python-ресурсов](https://t.me/addlist/8vDUwYRGujRmZjFi)** — целая подборка полезных Python-ресурсов для прокачки.
+
+### 🗺 Другие полезные Roadmap
+
+- [Machine Learning Roadmap](https://github.com/justxor/MachineLearningRoadmap) — полный roadmap по машинному обучению 2026.
+- [Linux Roadmap](https://github.com/justxor/linuxfullroadmap) — полная карта изучения Linux: топ бесплатных ресурсов и гайдов.
+
+---
+
 ## 🚀 Быстрый старт
 
 ```bash
@@ -1021,6 +1039,137 @@ check('https://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html
 - [regex101.com](https://regex101.com/) — отладка регулярок
 - [curlconverter.com](https://curlconverter.com/) — cURL → Python
 - [Insomnia](https://insomnia.rest/) / Postman — работа с API
+
+---
+
+## 🚀 Продвинутые темы с практикой
+
+Этот раздел — для тех, кто уже освоил основы и хочет выйти на production-уровень. Каждая тема сопровождается практическим заданием.
+
+### 1. Обход TLS/JA3-фингерпринта
+
+Многие сайты определяют ботов по TLS-фингерпринту (JA3), который у `requests` отличается от реального браузера. Библиотека `curl_cffi` умеет имитировать TLS-отпечаток настоящего браузера.
+
+```python
+from curl_cffi import requests
+
+# Имитируем TLS-фингерпринт Chrome
+resp = requests.get(
+    "https://tls.peet.ws/api/all",
+    impersonate="chrome120",
+    timeout=20,
+)
+print(resp.json()["tls"]["ja3"])
+```
+
+> 🛠 **Практика:** сравните JA3-фингерпринт обычного `requests` и `curl_cffi` на сервисе `tls.peet.ws`. Найдите сайт, который блокирует первый, но пропускает второй.
+
+### 2. Распределённый парсинг через очередь Redis
+
+Когда одной машины мало, задачи раскладывают в очередь, а несколько воркеров разбирают её параллельно.
+
+```python
+import redis, json
+
+r = redis.Redis(host="localhost", port=6379, db=0)
+
+# Продюсер: кладём URL-ы в очередь
+def enqueue(urls):
+    for url in urls:
+        r.lpush("scrape:queue", json.dumps({"url": url}))
+
+# Воркер: забираем задачи и обрабатываем
+def worker():
+    while True:
+        _, raw = r.brpop("scrape:queue")
+        task = json.loads(raw)
+        process(task["url"])  # ваша логика парсинга
+```
+
+> 🛠 **Практика:** запустите 3 воркера в разных процессах и убедитесь, что 100 URL обрабатываются без дублей.
+
+### 3. Кэширование запросов
+
+`requests-cache` прозрачно кэширует ответы — это ускоряет разработку и бережёт сайт от лишней нагрузки.
+
+```python
+import requests_cache
+
+session = requests_cache.CachedSession(
+    "http_cache",
+    expire_after=3600,        # кэш живёт 1 час
+    allowable_methods=["GET"],
+)
+resp = session.get("https://example.com")
+print(resp.from_cache)  # False при первом запросе, True при повторном
+```
+
+> 🛠 **Практика:** оберните свой парсер в `CachedSession` и измерьте время повторного прогона.
+
+### 4. Мониторинг и метрики
+
+Production-парсеру нужны метрики: сколько запросов, ошибок, какова средняя задержка.
+
+```python
+from dataclasses import dataclass, field
+import time
+
+@dataclass
+class Metrics:
+    requests: int = 0
+    errors: int = 0
+    started: float = field(default_factory=time.time)
+
+    def hit(self): self.requests += 1
+    def fail(self): self.errors += 1
+
+    def report(self):
+        elapsed = time.time() - self.started
+        rps = self.requests / elapsed if elapsed else 0
+        return f"{self.requests} запросов, {self.errors} ошибок, {rps:.1f} rps"
+
+m = Metrics()
+```
+
+> 🛠 **Практика:** добавьте `Metrics` в свой парсер и выводите отчёт каждые 30 секунд.
+
+### 5. Инкрементальный парсинг по хешу контента
+
+Чтобы не обрабатывать одно и то же повторно, сохраняйте хеш контента и сравнивайте при следующем запуске.
+
+```python
+import hashlib
+
+def content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+seen = {}  # url -> hash
+
+def changed(url: str, html: str) -> bool:
+    h = content_hash(html)
+    if seen.get(url) == h:
+        return False
+    seen[url] = h
+    return True
+```
+
+> 🛠 **Практика:** реализуйте сохранение хешей в SQLite, чтобы состояние переживало перезапуск.
+
+### 6. Продвинутые антипаттерны
+
+| Антипаттерн | Почему плохо | Как правильно |
+|---|---|---|
+| Парсинг без `time.sleep`/лимитов | Бан по IP, нагрузка на сайт | Rate limiting, случайные задержки |
+| Хранение всего в памяти | OOM на больших объёмах | Стриминг, запись в БД пачками |
+| Один `try/except` на всё | Скрывает реальные ошибки | Точечная обработка по типам |
+| Хардкод селекторов | Ломается при редизайне | Конфиг + мониторинг изменений |
+
+### 🗺 Что учить дальше
+
+После этого курса логично двигаться в смежные области — карты ниже помогут спланировать путь:
+
+- [Machine Learning Roadmap](https://github.com/justxor/MachineLearningRoadmap)
+- [Linux Roadmap](https://github.com/justxor/linuxfullroadmap)
 
 ---
 

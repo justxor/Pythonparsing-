@@ -1171,6 +1171,160 @@ def changed(url: str, html: str) -> bool:
 - [Machine Learning Roadmap](https://github.com/justxor/MachineLearningRoadmap)
 - [Linux Roadmap](https://github.com/justxor/linuxfullroadmap)
 
+## 🧰 Продвинутые приёмы парсинга
+
+Набор практичных приёмов, которые экономят часы и делают парсер быстрее и надёжнее.
+
+### 1. Находим данные через sitemap.xml
+
+Вместо обхода пагинации часто проще взять все URL прямо из карты сайта.
+
+```python
+import requests
+from lxml import etree
+
+def urls_from_sitemap(sitemap_url: str) -> list[str]:
+    xml = requests.get(sitemap_url, timeout=15).content
+    root = etree.fromstring(xml)
+    ns = {"s": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+    # sitemap может ссылаться на вложенные карты
+    nested = root.xpath("//s:sitemap/s:loc/text()", namespaces=ns)
+    if nested:
+        out = []
+        for sm in nested:
+            out += urls_from_sitemap(sm)
+        return out
+    return root.xpath("//s:url/s:loc/text()", namespaces=ns)
+```
+
+> 🛠 **Практика:** соберите все URL товаров сайта из `/sitemap.xml`, минуя листинги и пагинацию.
+
+### 2. Извлечение структурированных данных (JSON-LD)
+
+Многие сайты кладут готовые данные в `<script type="application/ld+json">` ради SEO — это чистый JSON без парсинга вёрстки.
+
+```python
+import json
+from bs4 import BeautifulSoup
+
+def extract_jsonld(html: str) -> list[dict]:
+    soup = BeautifulSoup(html, "lxml")
+    blocks = []
+    for tag in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(tag.string or "{}")
+            blocks.extend(data if isinstance(data, list) else [data])
+        except json.JSONDecodeError:
+            continue
+    return blocks
+
+# Часто здесь лежит готовый Product с ценой, рейтингом и наличием
+products = [b for b in extract_jsonld(html) if b.get("@type") == "Product"]
+```
+
+> 🛠 **Практика:** найдите товар на любом маркетплейсе и достаньте цену из JSON-LD вместо CSS-селектора.
+
+### 3. Устойчивые селекторы вместо хрупких
+
+Селекторы по сгенерированным классам (`css-1a2b3c`) ломаются при каждом релизе. Цепляйтесь за стабильные атрибуты.
+
+```python
+# ❌ Хрупко — классы меняются при пересборке фронтенда
+soup.select_one("div.css-1a2b3c > span.sc-9f8e7d")
+
+# ✅ Надёжно — атрибуты данных и семантика живут дольше
+soup.select_one("[data-testid='product-price']")
+soup.select_one("[itemprop='price']")
+soup.find("meta", attrs={"property": "og:title"})["content"]
+```
+
+> 🛠 **Практика:** перепишите один хрупкий селектор своего парсера на `data-*`/`itemprop` и проверьте на двух версиях страницы.
+
+### 4. Переиспользование сессии браузера (cookies)
+
+Логиниться в браузере на каждый запуск — дорого. Сохраните состояние один раз и подгружайте его.
+
+```python
+from playwright.sync_api import sync_playwright
+
+# Первый запуск: логинимся вручную/программно и сохраняем состояние
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=False)
+    ctx = browser.new_context()
+    page = ctx.new_page()
+    page.goto("https://example.com/login")
+    # ... выполняем вход ...
+    ctx.storage_state(path="state.json")   # сохранили cookies + localStorage
+    browser.close()
+
+# Последующие запуски: стартуем уже залогиненными
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    ctx = browser.new_context(storage_state="state.json")
+    # сразу открываем закрытые страницы
+```
+
+> 🛠 **Практика:** сохраните `storage_state` после входа и убедитесь, что повторный запуск не требует логина.
+
+### 5. Перенос cookies из Playwright в requests
+
+Браузер нужен только чтобы пройти JS-проверку и получить cookies — дальше быстрее качать обычным `requests`.
+
+```python
+import requests
+
+# cookies получены из ctx.cookies() в Playwright
+browser_cookies = ctx.cookies()
+
+session = requests.Session()
+for c in browser_cookies:
+    session.cookies.set(c["name"], c["value"], domain=c["domain"])
+
+# Теперь тяжёлые страницы тянем через requests — в десятки раз быстрее
+resp = session.get("https://example.com/api/items", timeout=15)
+```
+
+> 🛠 **Практика:** пройдите JS-проверку браузером один раз, затем спарсите 50 страниц через `requests` с этими cookies.
+
+### 6. Обход honeypot-ловушек
+
+Сайты прячут невидимые ссылки/поля-приманки: переход по ним или их заполнение выдаёт бота.
+
+```python
+def is_honeypot(node) -> bool:
+    style = (node.get("style") or "").replace(" ", "").lower()
+    cls = " ".join(node.get("class", [])).lower()
+    return (
+        "display:none" in style
+        or "visibility:hidden" in style
+        or node.get("hidden") is not None
+        or "hidden" in cls or "trap" in cls
+    )
+
+# Берём только видимые ссылки
+links = [a for a in soup.select("a[href]") if not is_honeypot(a)]
+```
+
+> 🛠 **Практика:** перед переходом по ссылкам отфильтруйте скрытые элементы и логируйте, сколько ловушек отсеяно.
+
+### 7. Параллельный парсинг по процессам (CPU-bound)
+
+`asyncio` ускоряет сеть, но разбор тысяч больших HTML упирается в CPU. Здесь помогает `ProcessPoolExecutor`.
+
+```python
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
+
+def parse_html(html: str) -> dict:
+    ...  # тяжёлый разбор: lxml/regex/нормализация
+
+def parse_many(htmls: list[str]) -> list[dict]:
+    with ProcessPoolExecutor(max_workers=4) as ex:
+        return list(ex.map(parse_html, htmls, chunksize=20))
+```
+
+> 🛠 **Практика:** измерьте время разбора 1000 страниц в один поток и через `ProcessPoolExecutor`.
+
 ---
 
 ## 🗺 Дорожная карта обучения
